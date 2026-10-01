@@ -1,4 +1,4 @@
-# Namespaces with Pod Security Standards labels.
+## Namespaces with Pod Security Standards labels.
 # Apply to each cluster: kubectl apply -f k8s/namespaces.yaml
 
 apiVersion: v1
