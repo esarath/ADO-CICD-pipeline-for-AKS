@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>2. Installation Guide - AKS DevSecOps</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <h1>2 &middot; Installation &amp; Deployment Guide</h1>
+  <div class="sub">What to install, where to install it, in which order - with timeline estimates per step</div>
+</header>
+<nav>
+  <a href="index.html">Home</a>
+  <a href="01-architecture-blueprint.html">1. Architecture</a>
+  <a href="02-installation-guide.html" class="active">2. Install Guide</a>
+  <a href="03-pipelines-and-promotion.html">3. Pipelines &amp; Promotion</a>
+  <a href="04-deployment-strategies.html">4. Deploy Strategies</a>
+  <a href="05-monitoring-security.html">5. Monitoring &amp; Security</a>
+  <a href="06-cost-optimization.html">6. Cost Optimization</a>
+</nav>
+<div class="layout">
+<main>
+
+<div class="warning"><b>STOP — do the two pre-flight tasks below BEFORE running
+any script.</b> They take ~10 minutes and prevent the most common failures
+(name collisions and name mismatches between Bicep, pipelines, and Azure DevOps).</div>
+
+<h2 id="s-0">0. Pre-flight tasks (mandatory, ~10 min)</h2>
+
+<h3>0.1 Task 1 — Choose and set globally-unique resource names</h3>
+<p>Four resources in this design get <b>public DNS names</b>, so their names must
+be unique across <i>all of Azure</i> (not just your subscription). If any name is
+already taken by someone else, the deployment fails partway through.</p>
+
+<table>
+  <tr><th>Parameter</th><th>File</th><th>Rules</th><th>Check availability</th></tr>
+  <tr><td><code>acrNonProdName</code></td>
+      <td rowspan="2"><code>infra/bicep/params/platform.bicepparam</code></td>
+      <td>5–50 chars, <b>lowercase letters + digits only</b>, no dashes</td>
+      <td><code>az acr check-name --name acrhexaksnp001</code></td></tr>
+  <tr><td><code>acrProdName</code></td>
+      <td>same rules</td>
+      <td><code>az acr check-name --name acrhexakspr001</code></td></tr>
+  <tr><td><code>keyVaultName</code></td>
+      <td><code>platform.bicepparam</code></td>
+      <td>3–24 chars, letters/digits/dashes, must start with a letter</td>
+      <td>deploy will error if taken — pick a rare suffix (e.g. your initials + date: <code>kv-hexaks-jd26</code>)</td></tr>
+  <tr><td><code>grafanaName</code></td>
+      <td><code>platform.bicepparam</code></td>
+      <td>2–23 chars, letters/digits/dashes</td>
+      <td>same — change suffix if deploy reports a conflict</td></tr>
+</table>
+
+<p><b>What to do:</b></p>
+<ol class="tight">
+  <li>Run <code>scripts\00-prerequisites.ps1</code> first (it installs the CLI and logs you in) — or at minimum run <code>az login</code> + <code>az account set --subscription 995377ec-18d5-43bb-98db-74ab68a2ef8f</code>.</li>
+  <li>Check both ACR names:
+    <pre><code>az acr check-name --name acrhexaksnp001
+az acr check-name --name acrhexakspr001</code></pre>
+    If <code>nameAvailable: false</code> comes back, change the <code>001</code>
+    suffixes to something personal (e.g. <code>acrhexaksnp-jd26</code> &rarr;
+    remember: <b>no dashes allowed in ACR names</b>, use <code>acrhexaksnpjd26</code>).</li>
+  <li>Open <code>infra/bicep/params/platform.bicepparam</code> and set your final
+    names in <code>acrNonProdName</code>, <code>acrProdName</code>,
+    <code>keyVaultName</code>, <code>grafanaName</code>.</li>
+  <li>Open <code>infra/bicep/params/dev.bicepparam</code> and
+    <code>prod.bicepparam</code> and set the <b>same three names</b>
+    (<code>acrNonProdName</code>, <code>acrProdName</code>, <code>keyVaultName</code>)
+    so the environment deployments reference the correct shared resources.</li>
+</ol>
+
+<h3>0.2 Task 2 — Keep names consistent everywhere they are consumed</h3>
+<p>The same names are referenced in three different places. They must match
+<b>exactly</b> or pipelines will fail with "resource not found" errors.</p>
+
+<table>
+  <tr><th>Name / value</th><th>Where it must match</th></tr>
+  <tr>
+    <td><code>acrNonProdName</code>, <code>acrProdName</code>, <code>keyVaultName</code></td>
+    <td>① <code>platform.bicepparam</code> (creates them)<br>
+        ② <code>dev.bicepparam</code> + <code>prod.bicepparam</code> (RBAC wiring)<br>
+        ③ Azure DevOps &rarr; Library &rarr; variable group <code>platform-settings</code> (pipelines read these as <code>$(acrNonProdName)</code> etc.)</td>
+  </tr>
+  <tr>
+    <td>Service connection <code>sc-azdo-aks-platform</code></td>
+    <td>① Created once in Project Settings &rarr; Service connections (script 03 &sect;2)<br>
+        ② Referenced literally in all 4 pipeline YAMLs as <code>azureSubscription: 'sc-azdo-aks-platform'</code> — if you name yours differently, do a find-and-replace across <code>pipelines/</code></td>
+  </tr>
+  <tr>
+    <td>Variable group <code>platform-settings</code></td>
+    <td>① Created once in Pipelines &rarr; Library (script 03 &sect;3)<br>
+        ② Referenced in all 4 pipeline YAMLs as <code>group: platform-settings</code>; must contain <code>acrNonProdName, acrProdName, keyVaultName, aksDevRg, aksDevName, aksProdRg, aksProdName</code></td>
+  </tr>
+  <tr>
+    <td>Environments <code>aks-staging</code> / <code>aks-production</code></td>
+    <td>① Created once in Pipelines &rarr; Environments (script 03 &sect;4)<br>
+        ② Referenced in <code>azure-pipelines-cd.yml</code> as <code>environment:</code> targets — prod environment carries the Approvals gate</td>
+  </tr>
+  <tr>
+    <td><code>adminObjectId</code></td>
+    <td>Auto-filled by <code>01-deploy-infrastructure.ps1</code> from
+        <code>az ad signed-in-user show --query id</code> — no manual step needed
+        unless deploying Bicep by hand</td>
+  </tr>
+</table>
+
+<div class="tip"><b>Rule of thumb:</b> the Bicep param files are the single
+source of truth for resource names. Whatever you type there must be copied
+verbatim into the <code>platform-settings</code> variable group. The Azure
+DevOps objects (service connection, environments) are fixed names baked into
+the pipeline YAMLs — create them exactly as spelled, or find-and-replace in
+<code>pipelines/</code>.</div>
+
+<h3>0.3 Quick self-test before continuing</h3>
+<pre><code>az account show --query name          # must print: adminebooks
+az acr check-name --name &lt;your-np&gt;    # must print: "nameAvailable": true
+az acr check-name --name &lt;your-pr&gt;    # must print: "nameAvailable": true</code></pre>
+<p>If all three checks pass, proceed to Phase P0.</p>
+
+<h2 id="s-2-0">2.0 Tooling matrix - what installs where</h2>
+<table>
+  <tr><th>Tool</th><th>Where</th><th>Why</th><th>Install</th></tr>
+  <tr><td>Azure CLI + Bicep</td><td>Admin workstation</td><td>All provisioning</td><td rowspan="4"><code>scripts/00-prerequisites.ps1</code> (winget)</td></tr>
+  <tr><td>kubectl</td><td>Admin workstation</td><td>Cluster ops</td></tr>
+  <tr><td>Helm 3</td><td>Admin workstation</td><td>Local chart lint/debug</td></tr>
+  <tr><td>Git</td><td>Admin workstation</td><td>Push repo to Azure DevOps</td></tr>
+  <tr><td>Azure DevOps org + project</td><td>dev.azure.com</td><td>Pipelines, repos, environments</td><td>Portal, free tier - script 03</td></tr>
+  <tr><td>ARM service connection (WIF)</td><td>Azure DevOps project</td><td>Keyless Azure auth from pipelines</td><td>Portal - script 03 &sect;2</td></tr>
+  <tr><td>ArgoCD (optional)</td><td>Inside aks-hexaks-dev</td><td>GitOps alternative</td><td><code>gitops/argocd/install-argocd.ps1</code></td></tr>
+  <tr><td>SonarCloud (optional)</td><td>sonarcloud.io</td><td>Code quality gate</td><td>Free for public repos - script 03 &sect;8</td></tr>
+</table>
+
+<h2 id="s-2-1">2.1 Phase P0 - Foundations <span class="badge phase">Day 1-2</span></h2>
+<table>
+  <tr><th>Step</th><th>Command / action</th><th>Est.</th></tr>
+  <tr><td>Run prerequisites script (elevated PowerShell)</td>
+      <td><code>scripts\00-prerequisites.ps1</code></td><td>15 min</td></tr>
+  <tr><td>Create Azure DevOps org + project <code>aks-devsecops-platform</code></td>
+      <td>dev.azure.com portal</td><td>10 min</td></tr>
+  <tr><td>Push this folder as a repo (<code>platform</code>)</td>
+      <td><code>git init && git remote add origin ... && git push</code></td><td>10 min</td></tr>
+  <tr><td>Create ARM service connection <code>sc-azdo-aks-platform</code> (WIF)</td>
+      <td>script 03 &sect;2 + role assignment</td><td>15 min</td></tr>
+  <tr><td>Create variable group <code>platform-settings</code></td>
+      <td>script 03 &sect;3</td><td>10 min</td></tr>
+</table>
+
+<h2 id="s-2-2">2.2 Phase P1 - Shared platform <span class="badge phase">Day 3</span></h2>
+<p><code>scripts/01-deploy-infrastructure.ps1</code> does this automatically;
+it is broken out here so you know what runs where.</p>
+<table>
+  <tr><th>Deploys</th><th>Into RG</th><th>Bicep</th><th>Est.</th></tr>
+  <tr><td>LAW + AMW, ACR non-prod + prod, Key Vault, Grafana + RBAC</td>
+      <td><code>rg-hexaks-platform</code></td>
+      <td><code>platform.bicep</code></td><td>~5 min</td></tr>
+</table>
+<pre><code>az deployment group create -g rg-hexaks-platform \
+  --template-file infra/bicep/platform.bicep \
+  --parameters infra/bicep/params/platform.bicepparam</code></pre>
+
+<h2 id="s-2-3">2.3 Phase P2 - AKS clusters <span class="badge phase">Day 4-6</span></h2>
+<table>
+  <tr><th>Deploys</th><th>Into RG</th><th>Est.</th></tr>
+  <tr><td>VNet 10.42.0.0/24 + AKS staging (1&times;B2s sys + 0-3 B2s spot) + cross-RG RBAC</td>
+      <td><code>rg-hexaks-dev</code></td><td>~8-10 min</td></tr>
+  <tr><td>VNet 10.43.0.0/24 + AKS prod (same shape) + cross-RG RBAC</td>
+      <td><code>rg-hexaks-prod</code></td><td>~8-10 min</td></tr>
+</table>
+<p>Then <code>02-post-deployment-config.ps1</code>: kubeconfig, namespaces +
+NetworkPolicies, and <code>az aks update --enable-azure-monitor-metrics</code>
+to wire Managed Prometheus into the AMW.</p>
+<div class="tip"><b>Verify:</b> <code>kubectl get nodes</code> shows 1 Ready
+system node; the spot pool appears at 0 nodes until a workload with the spot
+toleration triggers scale-up.</div>
+
+<h2 id="s-2-4">2.4 Phase P3 - Pipelines <span class="badge phase">Week 2</span></h2>
+<table>
+  <tr><th>Step</th><th>Action</th><th>Est.</th></tr>
+  <tr><td>Create 4 pipelines from YAML</td><td>Portal - script 03 &sect;5</td><td>20 min</td></tr>
+  <tr><td>Create Environments + prod approval</td><td>script 03 &sect;4</td><td>10 min</td></tr>
+  <tr><td>Branch policy on main (build validation = PR pipeline)</td><td>script 03 &sect;6</td><td>10 min</td></tr>
+  <tr><td>Open test PR</td><td>PR pipeline green: lint, tests, gitleaks, trivy, docker build</td><td>~8 min/run</td></tr>
+  <tr><td>Merge</td><td>CI pipeline builds image &rarr; non-prod ACR &rarr; Trivy gate</td><td>~10 min/run</td></tr>
+</table>
+
+<h2 id="s-2-5">2.5 Phase P4 - CD + promotion <span class="badge phase">Week 3</span></h2>
+<table>
+  <tr><th>Step</th><th>Action</th><th>Est.</th></tr>
+  <tr><td>Run Promote pipeline</td><td>params: <code>imageTag=&lt;buildId&gt;</code>, <code>releaseTag=1.0.0</code></td><td>2 min</td></tr>
+  <tr><td>Run CD pipeline</td><td>staging auto-deploys via Helm; prod waits for approval</td><td>5 min + approval</td></tr>
+  <tr><td>Validate</td><td><code>kubectl get pods -n staging</code>, smoke test /health</td><td>5 min</td></tr>
+</table>
+
+<h2 id="s-2-6">2.6 Phase P5 - Hardening &amp; handover <span class="badge phase">Week 4</span></h2>
+<ul class="tight">
+  <li>Confirm Defender for Containers recommendations flowing (24-48h for first scan results).</li>
+  <li>Import AKS dashboards in Managed Grafana (browse &rarr; Azure Monitor dashboards).</li>
+  <li>Optional: install ArgoCD on the dev cluster and compare push vs pull models (doc 04).</li>
+  <li>Optional: enable App Routing (<code>az aks approuting enable</code>) for managed nginx ingress.</li>
+  <li>Set a <b>Cost Management budget + alert</b> on the subscription (doc 06).</li>
+  <li>Write access reviews: who can approve the <code>aks-production</code> environment.</li>
+</ul>
+
+<h2 id="s-2-7">2.7 Verification checklist</h2>
+<table>
+  <tr><th>Check</th><th>Pass criteria</th></tr>
+  <tr><td><code>az group list</code></td><td>3 RGs: platform, dev, prod</td></tr>
+  <tr><td><code>az acr repository list -n acrhexaksnp001</code></td><td><code>sampleapp</code> after first CI run</td></tr>
+  <tr><td><code>kubectl get pods -n staging</code></td><td>Running after CD staging stage</td></tr>
+  <tr><td>Grafana endpoint (platform deploy output)</td><td>Opens, Prometheus datasource present</td></tr>
+  <tr><td>LAW <code>KubePodInventory</code></td><td>Rows appear ~10 min after cluster create</td></tr>
+  <tr><td>Prod approval</td><td>CD pipeline pauses on <code>aks-production</code> until approved</td></tr>
+</table>
+
+</main>
+<aside class="toc"><div class="toc-box">
+  <h5>On this page</h5>
+  <a href="#s-0">0. Pre-flight tasks</a>
+  <a href="#s-2-0">2.0 Tooling matrix</a>
+  <a href="#s-2-1">2.1 P0 Foundations</a>
+  <a href="#s-2-2">2.2 P1 Shared platform</a>
+  <a href="#s-2-3">2.3 P2 AKS clusters</a>
+  <a href="#s-2-4">2.4 P3 Pipelines</a>
+  <a href="#s-2-5">2.5 P4 CD + promotion</a>
+  <a href="#s-2-6">2.6 P5 Hardening</a>
+  <a href="#s-2-7">2.7 Verification</a>
+</div></aside>
+</div>
+<footer>AKS DevSecOps blueprint &middot; doc 2 of 6</footer>
+</body>
+</html>

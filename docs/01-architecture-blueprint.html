@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>1. Architecture Blueprint - AKS DevSecOps</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <h1>1 &middot; Architecture Blueprint</h1>
+  <div class="sub">Reference-architecture walkthrough, component inventory, standards and decisions</div>
+</header>
+<nav>
+  <a href="index.html">Home</a>
+  <a href="01-architecture-blueprint.html" class="active">1. Architecture</a>
+  <a href="02-installation-guide.html">2. Install Guide</a>
+  <a href="03-pipelines-and-promotion.html">3. Pipelines &amp; Promotion</a>
+  <a href="04-deployment-strategies.html">4. Deploy Strategies</a>
+  <a href="05-monitoring-security.html">5. Monitoring &amp; Security</a>
+  <a href="06-cost-optimization.html">6. Cost Optimization</a>
+</nav>
+<div class="layout">
+<main>
+
+<h2 id="s-1-1">1.1 The end-to-end flow</h2>
+<div class="stage-flow">
+  <span class="node">Engineer</span><span class="arrow">&rarr;</span>
+  <span class="node">Git Repo</span><span class="arrow">&rarr;</span>
+  <span class="node">1. PR Pipeline</span><span class="arrow">&rarr;</span>
+  <span class="node">2. CI Pipeline</span><span class="arrow">&rarr;</span>
+  <span class="node">3. Non-Prod ACR</span><span class="arrow">&rarr;</span>
+  <span class="node">4. Promote</span><span class="arrow">&rarr;</span>
+  <span class="node">Prod ACR</span><span class="arrow">&rarr;</span>
+  <span class="node">5. CD Staging</span><span class="arrow">&rarr;</span>
+  <span class="node">Approve</span><span class="arrow">&rarr;</span>
+  <span class="node">6. CD Prod</span><span class="arrow">&rarr;</span>
+  <span class="node">7/8/9. Monitor+Operate</span>
+</div>
+
+<h2 id="s-1-2">1.2 Stage-by-stage</h2>
+
+<table>
+  <tr><th>#</th><th>Stage</th><th>What happens</th><th>Artifacts in this package</th></tr>
+  <tr><td>1</td><td><b>Commit + Pull Request</b></td>
+    <td>Engineer pushes a branch and opens a PR to <code>main</code>. A branch policy requires
+    reviewers, linked work items and a green validation build.</td>
+    <td><code>scripts/03-azure-devops-setup.md</code> &sect;6</td></tr>
+  <tr><td>2</td><td><b>PR validation pipeline</b></td>
+    <td>Runs on every PR: restore, lint (flake8), unit tests, Gitleaks secret scan,
+    Trivy filesystem scan, pip-audit dependency CVEs, optional SonarCloud analysis,
+    Docker build validation (no push).</td>
+    <td><code>pipelines/azure-pipelines-pr.yml</code>, <code>templates/security-scan-steps.yml</code>,
+    <code>templates/build-test-steps.yml</code></td></tr>
+  <tr><td>3</td><td><b>CI pipeline</b></td>
+    <td>On merge to <code>main</code>: pulls pipeline secrets from Key Vault
+    (<code>AzureKeyVault@2</code>), restore &rarr; compile &rarr; unit + integration tests &rarr;
+    publish Helm chart as build artifact &rarr; <code>az acr build</code> pushes to
+    <b>non-prod ACR</b> with <code>&lt;buildId&gt;</code>/<code>&lt;sha&gt;</code>/<code>dev-latest</code> tags &rarr;
+    Trivy image scan gate.</td>
+    <td><code>pipelines/azure-pipelines-ci.yml</code></td></tr>
+  <tr><td>4</td><td><b>Image promotion</b></td>
+    <td>Manual pipeline run with a tag + release semver. <code>az acr import</code>
+    copies the image server-side non-prod &rarr; prod ACR, stamps the release tag,
+    then locks tags immutable (<code>--write-enabled false</code>).</td>
+    <td><code>pipelines/azure-pipelines-promote.yml</code>, <code>templates/promote-image-steps.yml</code></td></tr>
+  <tr><td>5</td><td><b>CD &rarr; AKS staging</b></td>
+    <td>Helm <code>upgrade --install --atomic</code> into namespace <code>staging</code> on
+    <code>aks-hexaks-dev</code>, then automated acceptance tests.</td>
+    <td><code>pipelines/azure-pipelines-cd.yml</code>, <code>templates/deploy-helm-steps.yml</code>,
+    <code>helm/sample-app/values-staging.yaml</code></td></tr>
+  <tr><td>6</td><td><b>Manual intervention &rarr; CD &rarr; prod</b></td>
+    <td>Azure DevOps <b>Environment approval</b> on <code>aks-production</code> pauses the
+    stage until an approver signs off. Deploys the promoted immutable tag into
+    <code>production</code> on <code>aks-hexaks-prod</code>.</td>
+    <td><code>pipelines/azure-pipelines-cd.yml</code> (Production stage),
+    <code>helm/sample-app/values-production.yaml</code></td></tr>
+  <tr><td>7</td><td><b>Operator</b></td>
+    <td>Human-in-the-loop approvals, break-glass kubectl access (Entra + Azure RBAC),
+    ArgoCD syncs if the GitOps variant is chosen.</td>
+    <td><code>gitops/argocd/*</code></td></tr>
+  <tr><td>8</td><td><b>Cluster telemetry</b></td>
+    <td>Container Insights &rarr; Log Analytics (logs, inventory, audit). Managed
+    Prometheus &rarr; Azure Monitor Workspace (metrics). Managed Grafana renders both.</td>
+    <td><code>infra/bicep/modules/monitoring.bicep</code>, <code>grafana.bicep</code>,
+    <code>scripts/02-post-deployment-config.ps1</code></td></tr>
+  <tr><td>9</td><td><b>Security &amp; posture</b></td>
+    <td>Defender for Containers (runtime + image assessments), Azure Policy/Gatekeeper
+    addon, Key Vault CSI for secrets, NetworkPolicies, Pod Security Standards.</td>
+    <td><code>scripts/01-deploy-infrastructure.ps1</code> (pricing), <code>k8s/*.yaml</code></td></tr>
+</table>
+
+<h2 id="s-1-3">1.3 Resource inventory (per subscription)</h2>
+<table>
+  <tr><th>Resource group</th><th>Resources</th><th>SKU / size</th><th>Why this size</th></tr>
+  <tr>
+    <td><code>rg-hexaks-platform</code> (shared)</td>
+    <td>ACR non-prod <code>acrhexaksnp001</code><br>ACR prod <code>acrhexakspr001</code><br>
+        Key Vault <code>kv-hexaks-001</code><br>Log Analytics <code>law-hexaks</code><br>
+        AMW <code>amw-hexaks</code><br>Grafana <code>grafana-hexaks-001</code></td>
+    <td>Basic / Standard / PAYG</td>
+    <td>Cheapest SKUs that still support the required features; ACR Basic has no
+    private endpoints or retention (Premium-only) - noted as enterprise delta.</td>
+  </tr>
+  <tr>
+    <td><code>rg-hexaks-dev</code> (staging env)</td>
+    <td>VNet 10.42.0.0/24<br>AKS <code>aks-hexaks-dev</code>: 1&times;B2s system + 0-3&times;B2s <b>spot</b></td>
+    <td>Free control-plane tier</td>
+    <td>Staging only needs to be representative, not resilient. Spot pool scales
+    to zero when idle.</td>
+  </tr>
+  <tr>
+    <td><code>rg-hexaks-prod</code> (prod env)</td>
+    <td>VNet 10.43.0.0/24<br>AKS <code>aks-hexaks-prod</code>: 1&times;B2s system + 0-3&times;B2s <b>spot</b></td>
+    <td>Free control-plane tier</td>
+    <td>Same shape so promotion is truthful; for real prod raise tier + nodes
+    (see deltas below).</td>
+  </tr>
+</table>
+
+<h2 id="s-1-4">1.4 Key design decisions &amp; rationale</h2>
+<div class="grid cols2">
+  <div class="card"><h4>Azure CNI Overlay</h4>
+    Pod IPs come from <code>192.168.0.0/16</code> overlay, not the VNet, so a /25
+    node subnet is enough and the design scales without re-IPing. Day-0 decision -
+    changing later means recreating the cluster.</div>
+  <div class="card"><h4>Spot user pool + tiny system pool</h4>
+    The system pool (1&times;B2s, ~$30/mo) runs kube-system. All app workloads go to the
+    spot pool (up to ~90% cheaper) via tolerations. Spot evictions trigger the
+    autoscaler / workload reschedule; acceptable for a POC.</div>
+  <div class="card"><h4>Two ACRs, not one</h4>
+    Matches the reference architecture and creates a hard boundary: CI can only
+    push to non-prod; prod receives <i>copies</i> of already-validated digests.
+    Blast radius of a compromised pipeline is halved.</div>
+  <div class="card"><h4>Workload Identity + OIDC, zero secrets</h4>
+    <code>--enable-oidc-issuer --enable-workload-identity</code> on the cluster,
+    WIF service connection in Azure DevOps, KV CSI driver in pods. No stored
+    credentials anywhere in the chain.</div>
+  <div class="card"><h4>Environments = approval gates</h4>
+    Azure DevOps Environments (<code>aks-staging</code>, <code>aks-production</code>)
+    carry Approvals checks - the audit-friendly way to implement the manual
+    intervention box in the diagram.</div>
+  <div class="card"><h4>Helm push-model default, ArgoCD optional</h4>
+    Pipelines <i>push</i> Helm releases (simple, works everywhere). ArgoCD is
+    provided as the pull-model alternative where Git is the desired-state
+    source and merges are the approval mechanism.</div>
+</div>
+
+<h2 id="s-1-5">1.5 Naming, versioning &amp; release standards</h2>
+<h3>Resource naming</h3>
+<pre><code>&lt;type&gt;-&lt;prefix&gt;-&lt;env&gt;         rg-hexaks-dev, aks-hexaks-prod, vnet-hexaks-dev
+&lt;type&gt;&lt;prefix&gt;&lt;purpose&gt;&lt;seq&gt;   acrhexaksnp001 / acrhexakspr001  (ACR: alphanumeric only)
+&lt;type&gt;-&lt;prefix&gt;-&lt;seq&gt;          kv-hexaks-001, grafana-hexaks-001 (globally unique)</code></pre>
+
+<h3>Container image tagging policy</h3>
+<table>
+  <tr><th>Tag</th><th>Produced by</th><th>Registry</th><th>Mutable?</th></tr>
+  <tr><td><code>&lt;buildId&gt;</code> (e.g. 42)</td><td>CI</td><td>non-prod</td><td>No - one tag per build</td></tr>
+  <tr><td><code>&lt;shortSha&gt;</code> (e.g. 9f1a2b3)</td><td>CI</td><td>non-prod</td><td>No - traceability to commit</td></tr>
+  <tr><td><code>dev-latest</code></td><td>CI</td><td>non-prod</td><td>Yes - convenience pointer only</td></tr>
+  <tr><td><code>&lt;semver&gt;</code> (e.g. 1.4.0)</td><td>Promote</td><td>prod</td><td><b>No - locked immutable</b></td></tr>
+  <tr><td><code>&lt;semver&gt;-prod</code></td><td>Promote</td><td>prod</td><td><b>No - locked immutable</b></td></tr>
+</table>
+
+<h3>Environment flow</h3>
+<div class="stage-flow">
+  <span class="node">DEV (non-prod ACR)</span><span class="arrow">&rarr;</span>
+  <span class="node">QA</span><span class="arrow">&rarr;</span>
+  <span class="node">UAT</span><span class="arrow">&rarr;</span>
+  <span class="node">STAGING (aks-dev ns staging)</span><span class="arrow">&rarr;</span>
+  <span class="node">PROD (aks-prod ns production)</span>
+</div>
+<p>For a POC the logical DEV/QA/UAT stages collapse onto the single
+staging namespace/cluster using tags + Helm values - the promotion pipeline and
+tagging scheme already support adding dedicated namespaces/clusters later
+without redesigning.</p>
+
+<h3>Release strategy</h3>
+<ul class="tight">
+  <li><b>Trunk-based</b>: short-lived feature branches &rarr; PR &rarr; squash merge to <code>main</code>.</li>
+  <li><b>Release</b>: run the Promote pipeline with the CI tag + semver. Optionally cut a Git tag <code>v1.4.0</code> on the same commit.</li>
+  <li><b>Deploy</b>: CD pipeline deploys to staging automatically; production waits on Environment approval.</li>
+  <li><b>Rollback</b>: Helm <code>--atomic</code> auto-rolls-back on failure; manual rollback = redeploy previous immutable tag (never rebuild an old tag).</li>
+</ul>
+
+<h2 id="s-1-6">1.6 POC profile vs enterprise baseline</h2>
+<table>
+  <tr><th>Concern</th><th>This POC build</th><th>Enterprise baseline to revisit</th></tr>
+  <tr><td>Control plane SLA</td><td>Free tier</td><td>Standard/Uptime tier (99.95%), LTS version</td></tr>
+  <tr><td>System pool</td><td>1&times;B2s, untainted</td><td>3+ D4s_v5 across zones, CriticalAddonsOnly taint</td></tr>
+  <tr><td>Workload pool</td><td>B2s spot, 0-3</td><td>On-demand + spot mix, KEDA/HPA, PDBs, topology spread</td></tr>
+  <tr><td>API server</td><td>Public endpoint</td><td>Private cluster + authorized IP ranges</td></tr>
+  <tr><td>ACR</td><td>2&times;Basic, public</td><td>Premium + private endpoints + retention + geo-rep</td></tr>
+  <tr><td>Key Vault</td><td>Standard, public</td><td>Private endpoint, purge protection on, WAF policies</td></tr>
+  <tr><td>Ingress</td><td>ClusterIP (App Routing optional)</td><td>App Gateway for Containers / AGIC + WAF + TLS</td></tr>
+  <tr><td>Egress</td><td>LoadBalancer</td><td>Azure Firewall / NAT gateway, UDR-controlled</td></tr>
+  <tr><td>LAW retention</td><td>30 days, 1 GB/day cap</td><td>90-365 days, archive tier, Sentinel SIEM</td></tr>
+  <tr><td>Defender</td><td>Containers plan</td><td>Full CSPM + Defender across all workloads</td></tr>
+</table>
+<div class="note">The deltas are documented so the POC can grow into production
+without re-architecting - every "cheap" choice is a parameter or SKU, not a
+structural decision.</div>
+
+</main>
+<aside class="toc"><div class="toc-box">
+  <h5>On this page</h5>
+  <a href="#s-1-1">1.1 End-to-end flow</a>
+  <a href="#s-1-2">1.2 Stage-by-stage</a>
+  <a href="#s-1-3">1.3 Resource inventory</a>
+  <a href="#s-1-4">1.4 Design decisions</a>
+  <a href="#s-1-5">1.5 Naming &amp; versioning</a>
+  <a href="#s-1-6">1.6 POC vs enterprise</a>
+</div></aside>
+</div>
+<footer>AKS DevSecOps blueprint &middot; doc 1 of 6</footer>
+</body>
+</html>

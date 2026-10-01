@@ -1,0 +1,62 @@
+# Default values for sample-app. Environment files override these.
+
+replicaCount: 1
+slot: stable          # blue|green - used by blue-green deployments
+
+image:
+  repository: ""      # set via --set image.repository=<acr>/<repo>
+  tag: ""             # set via --set image.tag=<tag>
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+  workloadIdentityClientId: ""   # fill to bind an Entra workload identity
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+# Small resource footprint - sized for B2s / spot nodes
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+# Required so pods can land on the spot node pool (spot taint toleration)
+tolerations:
+  - key: "kubernetes.azure.com/scalesetpriority"
+    operator: "Equal"
+    value: "spot"
+    effect: "NoSchedule"
+
+nodeSelector: {}
+affinity: {}
+
+# Spot nodes can be evicted at any time - spread replicas and prefer spot
+topologySpreadConstraints: []
+
+ingress:
+  enabled: false
+  className: "nginx"         # or "webapprouting.kubernetes.io" w/ App Routing
+  host: "sampleapp.local"
+  path: /
+
+networkPolicy:
+  enabled: true
+
+prometheus:
+  scrape: true               # adds prometheus.io/scrape annotations
+
+env:
+  APP_VERSION: "1.0.0"

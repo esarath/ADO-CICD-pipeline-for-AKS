@@ -1,0 +1,101 @@
+# =============================================================================
+# STAGE 3 - Continuous Integration pipeline (azure-pipelines-ci.yml)
+# main merge -> KV secrets -> restore/build/test -> artifacts -> docker image
+# -> push to NON-PROD ACR -> Trivy image scan gate.
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - docs/*
+
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: platform-settings   # acrNonProdName, acrProdName, keyVaultName, aksDevRg, aksDevName
+  - name: imageRepository
+    value: 'sampleapp'
+
+stages:
+  - stage: Build
+    displayName: 'CI Build & Test'
+    jobs:
+      - job: BuildTest
+        steps:
+          - checkout: self
+
+          # ---- Retrieve secrets from Azure Key Vault ----------------------
+          - task: AzureKeyVault@2
+            displayName: 'Fetch secrets from Key Vault'
+            inputs:
+              azureSubscription: 'sc-azdo-aks-platform'   # ARM service connection
+              KeyVaultName: '$(keyVaultName)'
+              SecretsFilter: '*'
+              RunAsPreJob: true
+
+          - template: templates/build-test-steps.yml
+            parameters:
+              sourcePath: 'src'
+              runIntegrationTests: true
+
+          - template: templates/security-scan-steps.yml
+            parameters:
+              sourcePath: 'src'
+              failOnFindings: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish deploy artifacts'
+            inputs:
+              pathToPublish: 'helm'
+              artifactName: 'helm-charts'
+
+  - stage: Docker
+    displayName: 'Build & Push Image (non-prod ACR)'
+    dependsOn: Build
+    jobs:
+      - job: BuildPush
+        steps:
+          - checkout: self
+
+          # ACR Tasks build - no Docker daemon needed on the agent
+          - task: AzureCLI@2
+            displayName: 'az acr build -> non-prod ACR'
+            inputs:
+              azureSubscription: 'sc-azdo-aks-platform'
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $sha = "$(Build.SourceVersion)".Substring(0,7)
+                $tags = @(
+                  "$(imageRepository):$(Build.BuildId)",
+                  "$(imageRepository):$sha",
+                  "$(imageRepository):dev-latest"
+                ) -join ' -t '
+                az acr build --registry $(acrNonProdName) `
+                  --image $(imageRepository):$(Build.BuildId) `
+                  --image $(imageRepository):$sha `
+                  --image $(imageRepository):dev-latest `
+                  --file src/Dockerfile src
+
+          # ---- Image vulnerability gate ------------------------------------
+          - task: Bash@3
+            displayName: 'Image scan (Trivy)'
+            inputs:
+              targetType: inline
+              script: |
+                curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /tmp/trivybin latest
+                /tmp/trivybin/trivy image \
+                  $(acrNonProdName).azurecr.io/$(imageRepository):$(Build.BuildId) \
+                  --severity HIGH,CRITICAL --exit-code 1
+
+          - pwsh: |
+              Write-Host "##vso[build.addbuildtag]ci-passed"
+              Write-Host "##vso[task.setvariable variable=imageTag;isOutput=true]$(Build.BuildId)"
+            name: setTag
+            displayName: 'Export image tag'

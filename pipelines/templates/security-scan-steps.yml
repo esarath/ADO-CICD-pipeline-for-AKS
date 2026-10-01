@@ -1,0 +1,48 @@
+# =============================================================================
+# security-scan-steps.yml - reusable PR/CI security gate steps
+# Tools: Gitleaks (secrets), Trivy filesystem scan (vulns + misconfig),
+#        pip-audit (Python dependency CVEs).
+# failOnFindings: true -> exit-code 1 blocks the pipeline on HIGH/CRITICAL.
+# =============================================================================
+parameters:
+  sourcePath: 'src'
+  trivySeverity: 'HIGH,CRITICAL'
+  failOnFindings: true   # set false to run scans as advisory-only (POC tuning)
+
+steps:
+  # ---- Secret detection -----------------------------------------------------
+  - task: Bash@3
+    displayName: 'Secret scan (Gitleaks)'
+    inputs:
+      targetType: inline
+      script: |
+        EXIT=0; [ '${{ parameters.failOnFindings }}' = 'True' ] && EXIT=1
+        curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+        tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+        /tmp/gitleaks detect --source . --verbose --redact --exit-code $EXIT
+
+  # ---- Dependency CVE scan --------------------------------------------------
+  - task: Bash@3
+    displayName: 'Dependency scan (pip-audit)'
+    inputs:
+      targetType: inline
+      script: |
+        pip install pip-audit
+        if [ '${{ parameters.failOnFindings }}' = 'True' ]; then
+          pip-audit -r ${{ parameters.sourcePath }}/requirements.txt
+        else
+          pip-audit -r ${{ parameters.sourcePath }}/requirements.txt || true
+        fi
+
+  # ---- Filesystem vulnerability + misconfig scan ----------------------------
+  - task: Bash@3
+    displayName: 'Filesystem scan (Trivy)'
+    inputs:
+      targetType: inline
+      script: |
+        EXIT=0; [ '${{ parameters.failOnFindings }}' = 'True' ] && EXIT=1
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /tmp/trivybin latest
+        /tmp/trivybin/trivy fs . \
+          --severity ${{ parameters.trivySeverity }} \
+          --scanners vuln,misconfig,secret \
+          --exit-code $EXIT

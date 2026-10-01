@@ -1,0 +1,30 @@
+# ArgoCD Application - production track (manual sync = GitOps approval gate).
+# The pipeline updates image.tag via a PR to the release branch; merging the
+# PR IS the deployment approval - ArgoCD then converges the cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sampleapp-production
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: '<GIT_REPO_URL>'
+    targetRevision: release/prod    # releases land via PR to this branch
+    path: helm/sample-app
+    helm:
+      valueFiles:
+        - values-production.yaml
+      parameters:
+        - name: image.repository
+          value: '<ACR_PROD>.azurecr.io/sampleapp'
+        - name: image.tag
+          value: '1.0.0'            # pinned immutable release tag
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+    # No automated sync: production converges only on manual "Sync" (or an
+    # approval-driven pipeline calling `argocd app sync`).

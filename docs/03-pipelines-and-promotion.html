@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3. Pipelines &amp; Image Promotion - AKS DevSecOps</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <h1>3 &middot; Pipelines &amp; Image Promotion</h1>
+  <div class="sub">PR &rarr; CI &rarr; Promote &rarr; CD, security tooling, tagging/versioning/release strategy</div>
+</header>
+<nav>
+  <a href="index.html">Home</a>
+  <a href="01-architecture-blueprint.html">1. Architecture</a>
+  <a href="02-installation-guide.html">2. Install Guide</a>
+  <a href="03-pipelines-and-promotion.html" class="active">3. Pipelines &amp; Promotion</a>
+  <a href="04-deployment-strategies.html">4. Deploy Strategies</a>
+  <a href="05-monitoring-security.html">5. Monitoring &amp; Security</a>
+  <a href="06-cost-optimization.html">6. Cost Optimization</a>
+</nav>
+<div class="layout">
+<main>
+
+<h2 id="s-3-1">3.1 Pipeline inventory</h2>
+<table>
+  <tr><th>Pipeline</th><th>File</th><th>Trigger</th><th>Purpose</th></tr>
+  <tr><td>PR - Validate</td><td><code>pipelines/azure-pipelines-pr.yml</code></td>
+      <td>PR to main (branch policy)</td><td>Quality + security gate before merge</td></tr>
+  <tr><td>CI - Build &amp; Push</td><td><code>pipelines/azure-pipelines-ci.yml</code></td>
+      <td>Merge to main</td><td>Build, test, scan, push image to <b>non-prod</b> ACR</td></tr>
+  <tr><td>Promote - Image</td><td><code>pipelines/azure-pipelines-promote.yml</code></td>
+      <td>Manual (params)</td><td>Copy validated image to <b>prod</b> ACR, tag + lock immutable</td></tr>
+  <tr><td>CD - Staging &amp; Prod</td><td><code>pipelines/azure-pipelines-cd.yml</code></td>
+      <td>Manual / chained</td><td>Helm deploy staging &rarr; approval &rarr; production</td></tr>
+</table>
+
+<h2 id="s-3-2">3.2 Security tooling map</h2>
+<table>
+  <tr><th>Layer</th><th>Tool</th><th>Stage</th><th>Cost</th></tr>
+  <tr><td>Secrets in code</td><td>Gitleaks</td><td>PR + CI</td><td>Free OSS</td></tr>
+  <tr><td>Dependency CVEs</td><td>pip-audit (swap per stack: npm audit, Trivy deps)</td><td>PR + CI</td><td>Free OSS</td></tr>
+  <tr><td>Filesystem/code vulns</td><td>Trivy fs (vuln+misconfig+secret)</td><td>PR + CI</td><td>Free OSS</td></tr>
+  <tr><td>Code quality/SAST</td><td>SonarCloud (or self-hosted SonarQube)</td><td>PR</td><td>Free public / OSS</td></tr>
+  <tr><td>Image vulns</td><td>Trivy image scan post-push</td><td>CI gate + post-promote verify</td><td>Free OSS</td></tr>
+  <tr><td>Runtime/image posture</td><td>Defender for Containers</td><td>Continuous</td><td>~paid (doc 06)</td></tr>
+  <tr><td>Cluster policy</td><td>Azure Policy addon (Gatekeeper)</td><td>Continuous</td><td>Free</td></tr>
+</table>
+
+<h2 id="s-3-3">3.3 Image promotion strategy</h2>
+<p>Promotion is a <b>copy of a digest</b>, never a rebuild. The CI pipeline is the
+only writer to the non-prod registry; the Promote pipeline is the only writer
+to the prod registry. This makes the prod registry's contents a direct,
+auditable record of "what passed validation".</p>
+
+<div class="stage-flow">
+  <span class="node">CI pushes :42, :9f1a2b3, :dev-latest</span><span class="arrow">&rarr;</span>
+  <span class="node">Promote: az acr import :42 &rarr; prod ACR as :1.4.0 + :1.4.0-prod</span><span class="arrow">&rarr;</span>
+  <span class="node">Tags locked (--write-enabled false)</span><span class="arrow">&rarr;</span>
+  <span class="node">CD deploys :1.4.0</span>
+</div>
+
+<h3>Why <code>az acr import</code></h3>
+<ul class="tight">
+  <li>Server-side copy - no pull/push through the agent, no egress cost, seconds not minutes.</li>
+  <li>Preserves the <b>digest</b>, so "the bits that were scanned" are the bits deployed.</li>
+  <li>No Docker daemon or registry credentials needed on the agent - pure ARM/Entra auth.</li>
+</ul>
+
+<h3>DEV &rarr; QA &rarr; UAT &rarr; STAGING &rarr; PROD mapping</h3>
+<table>
+  <tr><th>Ring</th><th>Image source</th><th>Cluster/namespace</th><th>Gate</th></tr>
+  <tr><td>DEV</td><td><code>:dev-latest</code> / <code>:&lt;buildId&gt;</code></td><td>aks-dev <code>ns:dev</code> (optional)</td><td>CI green</td></tr>
+  <tr><td>QA</td><td><code>:&lt;buildId&gt;</code></td><td>aks-dev <code>ns:qa</code></td><td>auto</td></tr>
+  <tr><td>UAT</td><td><code>:&lt;buildId&gt;</code></td><td>aks-dev <code>ns:uat</code></td><td>env approval</td></tr>
+  <tr><td>STAGING</td><td><code>:&lt;buildId&gt;</code></td><td>aks-dev <code>ns:staging</code></td><td>env approval</td></tr>
+  <tr><td>PROD</td><td><code>:&lt;semver&gt;</code> (prod ACR)</td><td>aks-prod <code>ns:production</code></td><td>promote + env approval</td></tr>
+</table>
+<div class="note">POC runs all pre-prod rings as namespaces on the single dev
+cluster to save cost; the pipeline contract (tag + values file + environment)
+is identical, so adding dedicated clusters later is config, not redesign.</div>
+
+<h2 id="s-3-4">3.4 Versioning &amp; release strategy</h2>
+<ul class="tight">
+  <li><b>Semver</b> is the only prod-facing version: <code>MAJOR.MINOR.PATCH</code>.</li>
+  <li><b>Chart version</b> (<code>Chart.yaml</code>) bumps when manifests change; <code>appVersion</code> tracks the app semver.</li>
+  <li><b>Git tag</b> <code>v1.4.0</code> on the merge commit = the audit anchor; prod ACR tag <code>1.4.0</code> mirrors it.</li>
+  <li><b>Immutability</b>: prod tags are locked post-import; to "change" a release you promote a new tag - history is append-only.</li>
+  <li><b>Rollback</b>: redeploy previous semver tag (instant, deterministic) - never rebuild.</li>
+</ul>
+
+<h2 id="s-3-5">3.5 Pipeline wiring notes</h2>
+<ul class="tight">
+  <li><b>Secrets:</b> <code>AzureKeyVault@2</code> task fetches <code>*</code> secrets at job start
+      using the WIF service connection; the SP needs <i>Key Vault Secrets User</i>
+      on the vault (grant it during script 03 setup).</li>
+  <li><b>Agents:</b> Microsoft-hosted <code>ubuntu-latest</code>. If your private project
+      lacks a free parallel job, request the free grant or run a self-hosted agent
+      (spot B2s VM, ~$6/mo - script 03 &sect;7).</li>
+  <li><b>Approvals:</b> enforced on the <code>aks-production</code> <i>Environment</i>, not in
+      YAML - so the gate is auditable and can't be edited away by a pipeline change.</li>
+  <li><b>Chaining:</b> add a <code>resources.pipelines</code> trigger on the CD pipeline to
+      auto-run it after Promote succeeds (kept manual for POC control/cost).</li>
+</ul>
+
+</main>
+<aside class="toc"><div class="toc-box">
+  <h5>On this page</h5>
+  <a href="#s-3-1">3.1 Pipeline inventory</a>
+  <a href="#s-3-2">3.2 Security tooling</a>
+  <a href="#s-3-3">3.3 Image promotion</a>
+  <a href="#s-3-4">3.4 Versioning &amp; release</a>
+  <a href="#s-3-5">3.5 Wiring notes</a>
+</div></aside>
+</div>
+<footer>AKS DevSecOps blueprint &middot; doc 3 of 6</footer>
+</body>
+</html>

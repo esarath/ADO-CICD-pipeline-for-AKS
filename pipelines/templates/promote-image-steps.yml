@@ -1,0 +1,40 @@
+# =============================================================================
+# promote-image-steps.yml - promote an image non-prod ACR -> prod ACR.
+# Uses `az acr import` = server-side copy (no pull/push, no egress, fast).
+# Then locks the tag (immutable) so a prod tag can never be overwritten.
+# =============================================================================
+parameters:
+  azureSubscription: ''       # ARM service connection name
+  acrNonProdName: ''
+  acrProdName: ''
+  repository: 'sampleapp'
+  imageTag: ''                # e.g. 1.4.0 or build id being promoted
+  releaseTag: ''              # e.g. v1.4.0-prod - the immutable prod alias
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Import image into production ACR'
+    inputs:
+      azureSubscription: '${{ parameters.azureSubscription }}'
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        az acr import `
+          --name ${{ parameters.acrProdName }} `
+          --source ${{ parameters.acrNonProdName }}.azurecr.io/${{ parameters.repository }}:${{ parameters.imageTag }} `
+          --image ${{ parameters.repository }}:${{ parameters.imageTag }} `
+          --image ${{ parameters.repository }}:${{ parameters.releaseTag }}
+
+  - task: AzureCLI@2
+    displayName: 'Lock prod tags (immutable)'
+    inputs:
+      azureSubscription: '${{ parameters.azureSubscription }}'
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        foreach ($t in @("${{ parameters.imageTag }}", "${{ parameters.releaseTag }}")) {
+          az acr repository update `
+            --name ${{ parameters.acrProdName }} `
+            --image ${{ parameters.repository }}:$t `
+            --write-enabled false --delete-enabled false
+        }

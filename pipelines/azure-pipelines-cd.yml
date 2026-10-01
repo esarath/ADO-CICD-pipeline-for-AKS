@@ -1,0 +1,95 @@
+# =============================================================================
+# STAGES 5-6 - Continuous Deployment (azure-pipelines-cd.yml)
+# Staging AKS -> (acceptance + manual approval via Environments) -> Prod AKS.
+# Deployment strategy is a runtime parameter: rolling | bluegreen | canary.
+#
+# Create Azure DevOps Environments named:
+#   aks-staging    (optional: automated checks)
+#   aks-production (required: Approvals check -> the manual intervention gate)
+# =============================================================================
+
+trigger: none   # run manually, or wire a pipeline resource trigger to the CI/promote pipeline
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+parameters:
+  - name: imageTag
+    displayName: 'Image tag to deploy (release tag for prod)'
+    type: string
+  - name: strategy
+    displayName: 'Deployment strategy'
+    type: string
+    default: rolling
+    values: [rolling, bluegreen, canary]
+  - name: deployProd
+    displayName: 'Continue to production?'
+    type: boolean
+    default: false
+
+variables:
+  - group: platform-settings
+  - name: imageRepository
+    value: 'sampleapp'
+
+stages:
+  - stage: Staging
+    displayName: 'Deploy to AKS Staging'
+    jobs:
+      - deployment: StagingDeploy
+        environment: 'aks-staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - template: templates/deploy-helm-steps.yml
+                  parameters:
+                    azureSubscription: 'sc-azdo-aks-platform'
+                    resourceGroup: '$(aksDevRg)'        # rg-hexaks-dev
+                    aksName: '$(aksDevName)'            # aks-hexaks-dev
+                    namespace: 'staging'
+                    valuesFile: 'helm/sample-app/values-staging.yaml'
+                    imageRepository: '$(acrNonProdName).azurecr.io/$(imageRepository)'
+                    imageTag: '${{ parameters.imageTag }}'
+                    strategy: '${{ parameters.strategy }}'
+                    slot: 'green'
+
+      - job: AcceptanceTests
+        dependsOn: StagingDeploy
+        displayName: 'Staging acceptance tests'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'sc-azdo-aks-platform'
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials -g $(aksDevRg) -n $(aksDevName) --overwrite-existing
+                kubectl wait --for=condition=available deployment/sampleapp -n staging --timeout=120s
+                # Add real acceptance test suite here (Postman/Playwright/pytest)
+
+  - ${{ if eq(parameters.deployProd, true) }}:
+    - stage: Production
+      displayName: 'Deploy to AKS Production'
+      dependsOn: Staging
+      jobs:
+        - deployment: ProdDeploy
+          environment: 'aks-production'   # Approvals check enforced here
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+                  - template: templates/deploy-helm-steps.yml
+                    parameters:
+                      azureSubscription: 'sc-azdo-aks-platform'
+                      resourceGroup: '$(aksProdRg)'       # rg-hexaks-prod
+                      aksName: '$(aksProdName)'           # aks-hexaks-prod
+                      namespace: 'production'
+                      valuesFile: 'helm/sample-app/values-production.yaml'
+                      imageRepository: '$(acrProdName).azurecr.io/$(imageRepository)'
+                      imageTag: '${{ parameters.imageTag }}'
+                      strategy: '${{ parameters.strategy }}'
+                      slot: 'blue'

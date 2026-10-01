@@ -1,0 +1,61 @@
+# =============================================================================
+# STAGE 4 - Image Promotion pipeline (azure-pipelines-promote.yml)
+# Manual run. Copies a validated image non-prod ACR -> prod ACR via
+# `az acr import` (server-side, no pull/push), applies the release tag,
+# and locks both tags immutable.
+#
+# Naming/tagging policy (see doc 03):
+#   CI builds        : <repo>:<buildId>, <repo>:<shortSha>, <repo>:dev-latest
+#   Release/promoted : <repo>:<semver>   e.g. 1.4.0   (immutable in prod ACR)
+#   Prod alias       : <repo>:<semver>-prod
+# =============================================================================
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+parameters:
+  - name: imageTag
+    displayName: 'Image tag to promote (buildId or sha from CI)'
+    type: string
+  - name: releaseTag
+    displayName: 'Release semver (e.g. 1.4.0)'
+    type: string
+
+variables:
+  - group: platform-settings
+  - name: imageRepository
+    value: 'sampleapp'
+
+stages:
+  - stage: Promote
+    displayName: 'Promote image to production ACR'
+    jobs:
+      - job: PromoteImage
+        steps:
+          - template: templates/promote-image-steps.yml
+            parameters:
+              azureSubscription: 'sc-azdo-aks-platform'
+              acrNonProdName: '$(acrNonProdName)'
+              acrProdName: '$(acrProdName)'
+              repository: '$(imageRepository)'
+              imageTag: '${{ parameters.imageTag }}'
+              releaseTag: '${{ parameters.releaseTag }}'
+
+      # Optional: re-scan the imported image in the PROD registry as a gate
+      - job: VerifyProd
+        dependsOn: PromoteImage
+        steps:
+          - task: Bash@3
+            displayName: 'Verify image exists + scan in prod ACR'
+            inputs:
+              targetType: inline
+              script: |
+                az acr repository show --name $(acrProdName) \
+                  --image $(imageRepository):${{ parameters.releaseTag }}
+                curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /tmp/trivybin latest
+                /tmp/trivybin/trivy image \
+                  $(acrProdName).azurecr.io/$(imageRepository):${{ parameters.releaseTag }} \
+                  --severity CRITICAL --exit-code 1

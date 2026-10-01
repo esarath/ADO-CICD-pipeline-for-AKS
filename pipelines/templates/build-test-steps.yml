@@ -1,0 +1,52 @@
+# =============================================================================
+# build-test-steps.yml - restore, lint, unit tests, integration tests
+# Targeted at the sample Python app in src/; adapt commands per-stack.
+# =============================================================================
+parameters:
+  sourcePath: 'src'
+  pythonVersion: '3.12'
+  runIntegrationTests: false   # CI pipeline sets true; PR pipeline keeps it fast
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '${{ parameters.pythonVersion }}'
+
+  - task: Bash@3
+    displayName: 'Restore dependencies'
+    inputs:
+      targetType: inline
+      script: |
+        python -m pip install --upgrade pip
+        pip install -r ${{ parameters.sourcePath }}/requirements.txt
+        pip install flake8 pytest
+
+  - task: Bash@3
+    displayName: 'Lint (flake8)'
+    inputs:
+      targetType: inline
+      script: flake8 ${{ parameters.sourcePath }} --max-line-length=120 --statistics
+
+  - task: Bash@3
+    displayName: 'Unit tests (pytest)'
+    inputs:
+      targetType: inline
+      script: |
+        cd ${{ parameters.sourcePath }}
+        pytest tests/ -m "not integration" --junitxml=../unit-test-results.xml -v
+
+  - ${{ if eq(parameters.runIntegrationTests, true) }}:
+    - task: Bash@3
+      displayName: 'Integration tests (pytest)'
+      inputs:
+        targetType: inline
+        script: |
+          cd ${{ parameters.sourcePath }}
+          pytest tests/ -m "integration" --junitxml=../integration-test-results.xml -v
+
+  - task: PublishTestResults@2
+    displayName: 'Publish test results'
+    condition: succeededOrFailed()
+    inputs:
+      testResultsFiles: '*-test-results.xml'
+      testRunTitle: 'Python tests'

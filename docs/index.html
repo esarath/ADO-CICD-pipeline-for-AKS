@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AKS DevSecOps Platform - Implementation Blueprint</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <h1>End-to-End Enterprise AKS DevSecOps Platform</h1>
+  <div class="sub">Azure Kubernetes Service &middot; Azure DevOps &middot; ACR &middot; Key Vault &middot; Defender &middot; Managed Prometheus + Grafana &middot; Log Analytics</div>
+  <div class="sub">Subscription: <b>adminebooks</b> (995377ec-18d5-43bb-98db-74ab68a2ef8f) &middot; Cost profile: <b>POC-optimized / pay-as-you-go</b></div>
+</header>
+<nav>
+  <a href="index.html" class="active">Home</a>
+  <a href="01-architecture-blueprint.html">1. Architecture</a>
+  <a href="02-installation-guide.html">2. Install Guide</a>
+  <a href="03-pipelines-and-promotion.html">3. Pipelines &amp; Promotion</a>
+  <a href="04-deployment-strategies.html">4. Deploy Strategies</a>
+  <a href="05-monitoring-security.html">5. Monitoring &amp; Security</a>
+  <a href="06-cost-optimization.html">6. Cost Optimization</a>
+</nav>
+<div class="layout">
+<main>
+
+<h2 id="s-overview">What this package contains</h2>
+<p>A complete, ready-to-execute implementation of the reference architecture:
+two AKS clusters (staging + production), two Azure Container Registries
+(non-prod + prod), Key Vault, Log Analytics, Managed Prometheus, Managed
+Grafana, Defender for Cloud, and a 4-pipeline Azure DevOps flow
+(PR &rarr; CI &rarr; Promote &rarr; CD) with Helm and an ArgoCD GitOps
+alternative. Every compute choice is deliberately sized <b>small</b> and uses
+<b>Spot node pools</b> to protect a personal pay-as-you-go budget.</p>
+
+<div class="grid cols3">
+  <div class="card"><h4>1. Architecture Blueprint</h4>
+    <p>Stage-by-stage breakdown of the reference diagram, component inventory,
+    naming/tagging/versioning standards and release strategy.</p>
+    <a href="01-architecture-blueprint.html">Open &rarr;</a></div>
+  <div class="card"><h4>2. Installation Guide</h4>
+    <p>Exactly what to install, where, and in which order - with a
+    day-by-day/week-by-week timeline and verification checklists.</p>
+    <a href="02-installation-guide.html">Open &rarr;</a></div>
+  <div class="card"><h4>3. Pipelines &amp; Promotion</h4>
+    <p>The four pipeline YAMLs explained, security tooling table, and the
+    DEV&rarr;QA&rarr;UAT&rarr;STAGING&rarr;PROD image promotion design.</p>
+    <a href="03-pipelines-and-promotion.html">Open &rarr;</a></div>
+  <div class="card"><h4>4. Deployment Strategies</h4>
+    <p>Rolling, Blue-Green, Canary, Helm and ArgoCD GitOps - mechanics,
+    pros/cons and when to use each.</p>
+    <a href="04-deployment-strategies.html">Open &rarr;</a></div>
+  <div class="card"><h4>5. Monitoring &amp; Security</h4>
+    <p>Container Insights, Managed Prometheus/Grafana, Defender for Cloud,
+    Key Vault CSI, alerts, KQL queries and Day-2 operations.</p>
+    <a href="05-monitoring-security.html">Open &rarr;</a></div>
+  <div class="card"><h4>6. Cost Optimization</h4>
+    <p>Every SKU decision, estimated monthly bill, spot guidance and
+    budget guardrails for a personal subscription.</p>
+    <a href="06-cost-optimization.html">Open &rarr;</a></div>
+</div>
+
+<h2 id="s-repo">Repository map</h2>
+<pre><code>Hexaware/
+├── docs/                     ← this documentation set (HTML)
+├── infra/bicep/              ← IaC: platform.bicep (shared) + main.bicep (env) + modules + params
+├── pipelines/                ← Azure DevOps YAML: pr, ci, promote, cd + templates/
+├── helm/sample-app/          ← Helm chart (staging + production values)
+├── k8s/                      ← namespaces + baseline NetworkPolicies
+├── gitops/argocd/            ← ArgoCD installer + Application manifests
+├── scripts/                  ← 00 prerequisites → 01 deploy → 02 config → 03 Azure DevOps
+└── src/                      ← sample Flask app + Dockerfile + tests</code></pre>
+
+<h2 id="s-order">Execution order (TL;DR)</h2>
+<ol class="tight">
+  <li>Read <a href="02-installation-guide.html">doc 02</a> once, end to end.</li>
+  <li>Complete <b>Pre-flight tasks &sect;0</b> in doc 02 — set globally-unique names
+      in the Bicep param files and plan the exact names Azure DevOps will use
+      (service connection, variable group, environments).</li>
+  <li>Run <code>scripts/00-prerequisites.ps1</code> (tools + login + providers).</li>
+  <li>Run <code>scripts/01-deploy-infrastructure.ps1</code> (~15-20 min).</li>
+  <li>Run <code>scripts/02-post-deployment-config.ps1</code>.</li>
+  <li>Follow <code>scripts/03-azure-devops-setup.md</code> in the Azure DevOps portal.</li>
+  <li>Open a test PR &rarr; watch PR &rarr; CI &rarr; Promote &rarr; CD flow.</li>
+</ol>
+
+<h2 id="s-timeline">Timeline at a glance</h2>
+<table>
+  <tr><th>Phase</th><th>Window</th><th>Outcome</th></tr>
+  <tr><td><span class="badge phase">P0</span> Foundations</td><td>Day 1-2</td><td>Tools installed, Azure DevOps org + repo + service connection ready</td></tr>
+  <tr><td><span class="badge phase">P1</span> Platform infra</td><td>Day 3-4</td><td>ACRs, Key Vault, LAW, AMW, Grafana deployed via Bicep</td></tr>
+  <tr><td><span class="badge phase">P2</span> AKS clusters</td><td>Day 5-6</td><td>Staging + prod clusters up, RBAC, Prometheus wired</td></tr>
+  <tr><td><span class="badge phase">P3</span> Pipelines</td><td>Week 2</td><td>PR validation + CI green, first image in non-prod ACR</td></tr>
+  <tr><td><span class="badge phase">P4</span> CD + promotion</td><td>Week 3</td><td>Helm deploys to staging; promoted release lands in prod</td></tr>
+  <tr><td><span class="badge phase">P5</span> Hardening &amp; ops</td><td>Week 4</td><td>Defender alerts, dashboards, runbooks, handover</td></tr>
+</table>
+<div class="tip">Solo part-time effort: ~4 weeks. Full-time pair: ~10-12 working days.
+Detailed per-step timing is in doc 02.</div>
+
+</main>
+<aside class="toc"><div class="toc-box">
+  <h5>On this page</h5>
+  <a href="#s-overview">What this contains</a>
+  <a href="#s-repo">Repository map</a>
+  <a href="#s-order">Execution order</a>
+  <a href="#s-timeline">Timeline at a glance</a>
+</div></aside>
+</div>
+<footer>Generated for the adminebooks subscription &middot; POC cost profile &middot; AKS DevSecOps reference implementation</footer>
+</body>
+</html>

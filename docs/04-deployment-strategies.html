@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>4. Deployment Strategies - AKS DevSecOps</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <h1>4 &middot; Deployment Strategies</h1>
+  <div class="sub">Rolling, Blue-Green, Canary, Helm and ArgoCD GitOps - mechanics, pros/cons, selection guide</div>
+</header>
+<nav>
+  <a href="index.html">Home</a>
+  <a href="01-architecture-blueprint.html">1. Architecture</a>
+  <a href="02-installation-guide.html">2. Install Guide</a>
+  <a href="03-pipelines-and-promotion.html">3. Pipelines &amp; Promotion</a>
+  <a href="04-deployment-strategies.html" class="active">4. Deploy Strategies</a>
+  <a href="05-monitoring-security.html">5. Monitoring &amp; Security</a>
+  <a href="06-cost-optimization.html">6. Cost Optimization</a>
+</nav>
+<div class="layout">
+<main>
+
+<h2 id="s-4-1">4.1 Helm - the packaging layer</h2>
+<p>All strategies below are executed through the same Helm chart
+(<code>helm/sample-app</code>) via <code>templates/deploy-helm-steps.yml</code>.
+The chart carries: Deployment (probes, securityContext, resources),
+Service (slot-aware selector for blue-green), HPA, ServiceAccount
+(workload-identity ready), Ingress, NetworkPolicy.</p>
+<pre><code>helm upgrade --install sampleapp helm/sample-app \
+  -n staging -f helm/sample-app/values-staging.yaml \
+  --set image.repository=&lt;acr&gt;.azurecr.io/sampleapp \
+  --set image.tag=1.4.0 --atomic --timeout 5m</code></pre>
+<p><code>--atomic</code> auto-rolls-back on failure - the built-in safety net for
+every strategy below.</p>
+
+<h2 id="s-4-2">4.2 Rolling (default)</h2>
+<p><b>Mechanics:</b> <code>strategy=RollingUpdate, maxUnavailable=0, maxSurge=1</code>
+- new pods come up before old ones die; one extra pod of capacity needed.</p>
+<table>
+  <tr><th>Pros</th><th>Cons</th></tr>
+  <tr><td>Zero config, minimal extra capacity (+1 pod), gradual exposure, native rollback via <code>helm rollback</code></td>
+  <td>Both versions serve traffic mid-rollout - no instant revert; a bad pod mix can confuse stateful clients</td></tr>
+</table>
+<p><b>Use when:</b> stateless services, backward-compatible API/schema changes - the sensible default for this POC.</p>
+
+<h2 id="s-4-3">4.3 Blue-Green</h2>
+<p><b>Mechanics:</b> deploy a full parallel release <code>sampleapp-green</code>
+into the same namespace, wait healthy, then patch the stable Service selector
+<code>slot: blue &rarr; green</code>. Instant cutover, instant rollback (patch back).
+Implemented in <code>deploy-helm-steps.yml</code> via <code>strategy=bluegreen</code>.</p>
+<table>
+  <tr><th>Pros</th><th>Cons</th></tr>
+  <tr><td>Atomic cutover &amp; instant rollback, full pre-prod validation of the new stack, no mixed-version traffic</td>
+  <td>2&times; capacity during cutover (watch spot pool limits), DB schema must be compatible with both versions, in-flight requests on old pods dropped unless drained</td></tr>
+</table>
+<p><b>Use when:</b> releases that must cut over cleanly and revert instantly
+(e.g., payment flows, demos to stakeholders).</p>
+
+<h2 id="s-4-4">4.4 Canary</h2>
+<p><b>Mechanics:</b> <code>strategy=canary</code> runs a small canary release
+alongside stable (e.g. 1 pod vs 2). Traffic splits roughly by replica ratio on
+ClusterIP; for precise 5/25/50% weighting use Flagger + Istio/NGINX (Day-2
+add-on). Promote = scale canary up / make it stable; abort = delete canary.</p>
+<table>
+  <tr><th>Pros</th><th>Cons</th></tr>
+  <tr><td>Smallest blast radius, real-traffic validation, metrics-driven promotion</td>
+  <td>Needs meaningful traffic + good metrics to be useful; without Flagger, weighting is coarse; session affinity complicates things</td></tr>
+</table>
+<p><b>Use when:</b> high-traffic user-facing services where regression cost is high.
+For a POC, demonstrate the coarse replica-ratio version.</p>
+
+<h2 id="s-4-5">4.5 Strategy comparison</h2>
+<table>
+  <tr><th></th><th>Rolling</th><th>Blue-Green</th><th>Canary</th></tr>
+  <tr><td>Extra capacity</td><td>+1 pod</td><td>~2&times;</td><td>+small %</td></tr>
+  <tr><td>Cutover speed</td><td>gradual</td><td>instant</td><td>gradual</td></tr>
+  <tr><td>Rollback speed</td><td>minutes</td><td>seconds</td><td>seconds</td></tr>
+  <tr><td>Mixed-version traffic</td><td>yes</td><td>no</td><td>yes (controlled)</td></tr>
+  <tr><td>Infra complexity</td><td>none</td><td>low</td><td>medium-high</td></tr>
+  <tr><td>Best for</td><td>default choice</td><td>critical cutovers</td><td>risky/high-traffic changes</td></tr>
+</table>
+
+<h2 id="s-4-6">4.6 GitOps alternative - ArgoCD</h2>
+<p>The YAML pipelines above use the <b>push</b> model (pipeline calls
+<code>helm upgrade</code>). ArgoCD flips it to <b>pull</b>: ArgoCD inside the
+cluster watches Git and converges the cluster to the declared state.</p>
+<table>
+  <tr><th></th><th>Push (pipelines + Helm)</th><th>Pull (ArgoCD)</th></tr>
+  <tr><td>Credentials</td><td>Pipeline needs cluster credentials (scoped by service connection)</td><td>None stored outside the cluster - ArgoCD pulls Git</td></tr>
+  <tr><td>Drift</td><td>Not detected out of the box</td><td>Auto-detected; <code>selfHeal</code> reverts manual edits</td></tr>
+  <tr><td>Approval</td><td>Azure DevOps Environment approval</td><td>PR merge to release branch (or manual Sync)</td></tr>
+  <tr><td>Audit</td><td>Pipeline runs</td><td>Git history = deploy history</td></tr>
+  <tr><td>Fit</td><td>Simpler, one pipeline does everything</td><td>Better for many services/clusters; extra component to run</td></tr>
+</table>
+<p><b>Install:</b> <code>gitops/argocd/install-argocd.ps1</code> then apply
+<code>application-staging.yaml</code> (auto-sync) and
+<code>application-production.yaml</code> (manual sync = approval).</p>
+
+<h2 id="s-4-7">4.7 Rollback cheat-sheet</h2>
+<pre><code># Helm history + rollback
+helm history sampleapp -n production
+helm rollback sampleapp &lt;rev&gt; -n production
+
+# Blue-green: point stable service back
+kubectl patch svc sampleapp -n production \
+  -p '{"spec":{"selector":{"app.kubernetes.io/name":"sample-app","slot":"blue"}}}'
+
+# ArgoCD: sync to previous commit, or selfHeal reverts manual drift automatically</code></pre>
+
+</main>
+<aside class="toc"><div class="toc-box">
+  <h5>On this page</h5>
+  <a href="#s-4-1">4.1 Helm packaging</a>
+  <a href="#s-4-2">4.2 Rolling</a>
+  <a href="#s-4-3">4.3 Blue-Green</a>
+  <a href="#s-4-4">4.4 Canary</a>
+  <a href="#s-4-5">4.5 Comparison</a>
+  <a href="#s-4-6">4.6 GitOps / ArgoCD</a>
+  <a href="#s-4-7">4.7 Rollback</a>
+</div></aside>
+</div>
+<footer>AKS DevSecOps blueprint &middot; doc 4 of 6</footer>
+</body>
+</html>

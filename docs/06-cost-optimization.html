@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>6. Cost Optimization - AKS DevSecOps</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <h1>6 &middot; Cost Optimization</h1>
+  <div class="sub">POC sizing decisions, estimated bill, spot strategy and budget guardrails</div>
+</header>
+<nav>
+  <a href="index.html">Home</a>
+  <a href="01-architecture-blueprint.html">1. Architecture</a>
+  <a href="02-installation-guide.html">2. Install Guide</a>
+  <a href="03-pipelines-and-promotion.html">3. Pipelines &amp; Promotion</a>
+  <a href="04-deployment-strategies.html">4. Deploy Strategies</a>
+  <a href="05-monitoring-security.html">5. Monitoring &amp; Security</a>
+  <a href="06-cost-optimization.html" class="active">6. Cost Optimization</a>
+</nav>
+<div class="layout">
+<main>
+
+<div class="warning"><b>Prices are indicative</b> (eastus, PAYG, at time of
+writing). Verify against the Azure pricing calculator for your tenant; treat
+the totals as order-of-magnitude guidance.</div>
+
+<h2 id="s-6-1">6.1 Estimated monthly bill (this POC build)</h2>
+<table>
+  <tr><th>Resource</th><th>SKU / sizing</th><th>Est. USD/mo</th><th>Notes</th></tr>
+  <tr><td>AKS control plane &times;2</td><td>Free tier</td><td>$0</td><td>No uptime SLA - deliberate POC choice</td></tr>
+  <tr><td>System node pools &times;2</td><td>1&times;Standard_B2s each</td><td>~$30 ea / ~$60 total</td><td>Ephemeral OS disk; autoscaler 1-2</td></tr>
+  <tr><td>Spot user pools &times;2</td><td>0-3&times;Standard_B2s spot</td><td>~$0-25</td><td>min 0 - only bills while scaled up; spot ~70-90% off</td></tr>
+  <tr><td>ACR &times;2</td><td>Basic</td><td>~$10</td><td>5 USD each</td></tr>
+  <tr><td>Key Vault</td><td>Standard</td><td>&lt;$1</td><td>Per-operation billing, negligible at POC volume</td></tr>
+  <tr><td>Log Analytics</td><td>PAYG, 1 GB/day cap, 30d</td><td>~$0-5</td><td>First 5 GB/mo free; cap prevents surprises</td></tr>
+  <tr><td>Managed Prometheus (AMW)</td><td>PAYG ingestion</td><td>~$1-5</td><td>Small cluster = small metric volume</td></tr>
+  <tr><td>Managed Grafana</td><td>Standard</td><td>~$9-15</td><td>Biggest optional cost - see zero-cost swap below</td></tr>
+  <tr><td>Defender for Containers</td><td>Standard</td><td>~$10-15</td><td>Per-vCPU pricing; can disable if budget is tight</td></tr>
+  <tr><td>Load balancers, egress, misc</td><td>Standard LB</td><td>~$5-10</td><td>1 public LB per cluster</td></tr>
+  <tr><td>Azure DevOps</td><td>Free tier</td><td>$0</td><td>5 users, 1 free MS-hosted job (grant) / self-hosted agent</td></tr>
+  <tr><th colspan="2">Total (everything on, clusters running)</th><th>~$100-130</th><th>&nbsp;</th></tr>
+  <tr><th colspan="2">Total (lean: Grafana OSS + Defender off + dev cluster stopped when idle)</th><th>~$45-60</th><th>&nbsp;</th></tr>
+</table>
+
+<h2 id="s-6-2">6.2 Why these choices</h2>
+<div class="grid cols2">
+  <div class="card"><h4><span class="badge cost">save ~90%</span> Spot node pool</h4>
+    All app workloads carry a toleration for the spot taint and prefer spot
+    nodes. <code>spotMaxPrice: -1</code> = never pay above on-demand; evict on
+    capacity. <code>Deallocate</code> eviction policy preserves the node for
+    restart. For a POC the occasional eviction IS the resilience test.</div>
+  <div class="card"><h4><span class="badge cost">save $$$</span> Spot scales to zero</h4>
+    <code>spotMinCount: 0</code> means the pool literally costs nothing while
+    idle. First pod scheduled triggers cluster-autoscaler scale-up (a few
+    minutes of Pending is normal and expected).</div>
+  <div class="card"><h4><span class="badge cost">free</span> Free control-plane tier</h4>
+    SLA isn't needed to validate the architecture. Flipping to Standard tier
+    later is a one-flag Day-1 change (<code>tier: 'Standard'</code> in
+    <code>aks.bicep</code>).</div>
+  <div class="card"><h4><span class="badge cost">cap</span> LAW daily quota</h4>
+    <code>dailyCapGb: 1</code> is a hard ceiling on log ingestion cost - the
+    #1 way POCs accidentally burn money. Raise deliberately, never discover.</div>
+</div>
+
+<h2 id="s-6-3">6.3 Levers if the bill needs to go lower</h2>
+<table>
+  <tr><th>Lever</th><th>How</th><th>Trade-off</th></tr>
+  <tr><td>Stop clusters when idle</td><td><code>az aks stop -g rg-hexaks-dev -n aks-hexaks-dev</code> (nights/weekends, or schedule via Automation)</td><td>System pool compute bills $0 while stopped; nodes take ~2-3 min to return</td></tr>
+  <tr><td>Drop Managed Grafana</td><td>Run Grafana OSS as a Helm release on the spot pool (free, same AMW datasource)</td><td>Self-managed, no SLA - fine for POC</td></tr>
+  <tr><td>Defer Defender for Containers</td><td>Skip the <code>az security pricing</code> block in script 01; keep Foundational CSPM (free)</td><td>Lose runtime threat detection + image assessments; pipeline scans remain</td></tr>
+  <tr><td>Single-cluster POC</td><td>Skip the prod deployment; use namespaces <code>staging</code>/<code>production</code> on one cluster</td><td>Saves ~$35/mo; less realistic blast-radius separation</td></tr>
+  <tr><td>Single ACR</td><td>Keep non-prod only; promote via retag instead of re-import</td><td>Saves ~$5/mo; weaker supply-chain boundary</td></tr>
+</table>
+
+<h2 id="s-6-4">6.4 Guardrails to set on day 1</h2>
+<ul class="tight">
+  <li><b>Budget:</b> Cost Management &rarr; Budgets &rarr; e.g. $100/mo with alerts at 50/80/100% to your email.</li>
+  <li><b>Tags:</b> every resource carries <code>project</code>/<code>environment</code>/<code>costProfile</code> so Cost Analysis pivots cleanly.</li>
+  <li><b>Review cadence:</b> weekly Cost Analysis by resource group; spot pool actual spend vs estimate.</li>
+  <li><b>Cleanup path:</b> <code>az group delete</code> on the three RGs removes everything (KV soft-delete survives 7 days by design - purge it if you want the name back).</li>
+</ul>
+
+</main>
+<aside class="toc"><div class="toc-box">
+  <h5>On this page</h5>
+  <a href="#s-6-1">6.1 Monthly estimate</a>
+  <a href="#s-6-2">6.2 Why these choices</a>
+  <a href="#s-6-3">6.3 Cost levers</a>
+  <a href="#s-6-4">6.4 Guardrails</a>
+</div></aside>
+</div>
+<footer>AKS DevSecOps blueprint &middot; doc 6 of 6</footer>
+</body>
+</html>

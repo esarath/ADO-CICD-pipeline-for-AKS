@@ -1,0 +1,75 @@
+# =============================================================================
+# STAGE 2 - Pull Request validation pipeline (azure-pipelines-pr.yml)
+# Wired via branch policy on main: Build Validation + required reviewers.
+# Never triggers on commits directly - PR only.
+# =============================================================================
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - docs/*
+      - '*.md'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: platform-settings   # variable group: acrNonProdName, acrProdName, keyVaultName etc.
+  - name: enableSonar
+    value: false               # flip to true after creating the SonarCloud service connection
+
+stages:
+  - stage: Validate
+    displayName: 'PR Validation & Quality Gates'
+    jobs:
+      - job: Quality
+        displayName: 'Lint, test, security scans'
+        steps:
+          - checkout: self
+            fetchDepth: 0   # full history for accurate gitleaks/sonar diff analysis
+
+          # ---- Build validation ------------------------------------------
+          - template: templates/build-test-steps.yml
+            parameters:
+              sourcePath: 'src'
+              runIntegrationTests: false
+
+          # ---- Security scanning ------------------------------------------
+          - template: templates/security-scan-steps.yml
+            parameters:
+              sourcePath: 'src'
+              failOnFindings: true
+
+          # ---- SonarQube / SonarCloud analysis (optional) ------------------
+          - ${{ if eq(variables.enableSonar, 'true') }}:
+            - task: SonarCloudPrepare@3
+              inputs:
+                SonarCloud: 'SonarCloud'           # service connection name
+                organization: '$(sonarOrg)'
+                scannerMode: 'cli'
+                configMode: 'manual'
+                cliProjectKey: 'aks-devsecops-sampleapp'
+                cliProjectName: 'aks-devsecops-sampleapp'
+                extraProperties: |
+                  sonar.sources=src
+                  sonar.python.version=3.12
+            - task: SonarCloudAnalyze@3
+            - task: SonarCloudPublish@3
+              inputs:
+                pollingTimeoutSec: '300'
+
+          # ---- Docker build validation (no push) ---------------------------
+          - task: Docker@2
+            displayName: 'Docker build (validate only)'
+            inputs:
+              containerRegistry: ''   # local build, no registry login
+              repository: 'sampleapp'
+              command: 'build'
+              Dockerfile: 'src/Dockerfile'
+              buildContext: 'src'
+              tags: 'pr-$(Build.BuildId)'

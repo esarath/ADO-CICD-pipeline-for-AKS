@@ -1,0 +1,63 @@
+# =============================================================================
+# deploy-helm-steps.yml - Helm deploy to AKS via ARM service connection.
+# strategy parameter: rolling (default) | bluegreen | canary
+#   - rolling:   standard `helm upgrade --install`
+#   - bluegreen: deploys a parallel release (<rel>-green/blue), then flips the
+#                stable Service selector. Run rollback by flipping back.
+#   - canary:    deploys a canary release at a small replica weight alongside
+#                stable; requires manual promotion step (see doc 04).
+# =============================================================================
+parameters:
+  azureSubscription: ''
+  resourceGroup: ''
+  aksName: ''
+  chartPath: 'helm/sample-app'
+  releaseName: 'sampleapp'
+  namespace: 'staging'
+  valuesFile: 'helm/sample-app/values-staging.yaml'
+  imageRepository: ''
+  imageTag: ''
+  strategy: 'rolling'
+  slot: 'green'              # used by bluegreen/canary
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Get AKS credentials + Helm deploy (${{ parameters.strategy }})'
+    inputs:
+      azureSubscription: '${{ parameters.azureSubscription }}'
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        az aks get-credentials --resource-group ${{ parameters.resourceGroup }} `
+          --name ${{ parameters.aksName }} --overwrite-existing
+        kubectl create namespace ${{ parameters.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+
+        $rel = "${{ parameters.releaseName }}"
+        $strategy = "${{ parameters.strategy }}"
+        if ($strategy -in @('bluegreen','canary')) { $rel = "$rel-${{ parameters.slot }}" }
+
+        helm upgrade --install $rel ${{ parameters.chartPath }} `
+          --namespace ${{ parameters.namespace }} `
+          --values ${{ parameters.valuesFile }} `
+          --set image.repository=${{ parameters.imageRepository }} `
+          --set image.tag=${{ parameters.imageTag }} `
+          --set slot=${{ parameters.slot }} `
+          --wait --timeout 5m --atomic
+
+        if ($strategy -eq 'bluegreen') {
+          # Flip the stable service selector to the new slot
+          kubectl patch service ${{ parameters.releaseName }} `
+            -n ${{ parameters.namespace }} `
+            -p '{"spec":{"selector":{"app.kubernetes.io/name":"sample-app","slot":"${{ parameters.slot }}"}}}'
+        }
+
+  - task: AzureCLI@2
+    displayName: 'Smoke test /health'
+    inputs:
+      azureSubscription: '${{ parameters.azureSubscription }}'
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        kubectl rollout status deployment/${{ parameters.releaseName }} `
+          -n ${{ parameters.namespace }} --timeout=120s
+        kubectl get pods -n ${{ parameters.namespace }} -o wide
